@@ -26,9 +26,9 @@ Beside the default `LOOKAHEAD_WPS`, the user can set a region where the vehicle 
 
 The `RefSpeed` defines each target waypoint's speed without the inteference of traffic. The `STOP_LINE` acts as a cutoff region where the vehicle must be absolutely stopped when seen red light.
 
-The `BufferTime` defines *something that needs to addressed later*.
+The `BufferTime` defines a stale time for the vehicle to react to traffic light.  
 
-## Localize and Follow Waypoints
+## Future Waypoints
 
 In side the `loop`, the waypoint_update node will continusly fetch an index from the `/base_waypoints` topic that is closely related the current position of the vehicle. 
 
@@ -46,15 +46,65 @@ In side the `loop`, the waypoint_update node will continusly fetch an index from
                 nearest_distance = distance
         return nearest_index
 ```
-This is then used to fetch next number of `LOOKAHEAD_WPS` and store them in a `lookAheadWpts` list, which will be published to the final topic `/final_waypoints`. 
+This is then used to fetch next number of `LOOKAHEAD_WPS` and store them in a `lookAheadWpts` list, which will be published to the final waypoint topic `/final_waypoints`. 
 ```python
-	message_to_sent = Lane()
-	message_to_sent.header.stamp = rospy.Time.now()
-	message_to_sent.header.frame_id = self.frame_id
-	message_to_sent.waypoints = lookAheadWpts
-	self.final_waypoints_pub.publish(message_to_sent)
+    def get_future_wpts(self):
+        # get index closest to current position
+        self.last_wp = self.nearest_wp(self.last_pos.position, self.base_waypoints)+1
+        # fetch next LOOKAHEAD number of waypoints
+        ahead = min(len(self.base_waypoints),self.last_wp+LOOKAHEAD_WPS)
+        # deep copy a set of lookahead pts
+        lookAheadWpts = deepcopy(self.base_waypoints[self.last_wp:ahead])
+        # construct default speed for lookAheadWpts
+        for waypoint in lookAheadWpts:
+            waypoint.twist.twist.linear.x = RefSpeed
 ```
 
-## Incorporating Traffic light
+## Incorporating Traffic Light
 
-To decide when to slow down, there are two condis
+To decide when to slow down, there are two conditions to consider. One condition decides if the traffic light is truly ahead of the vehicle and in the region for slowing down. Another condition decides whether the traffic light is new by looking at its timestamp and comparing it against a `BufferTime` variable. 
+
+```python
+    def decides_to_stop(self):
+        # use two conditions to determine when to slow down and when to go full throttle
+        legit_ahead = False
+        new_traffic = False
+
+        # when traffic light is first seen
+        if self.traffic_light_time > rospy.get_time() - BufferTime:
+            new_traffic = True
+        # when traffic light is ahead
+        if self.traffic_light_index > self.last_wp:
+            # calculate the distance between car and the traffic_light
+            d_car_light = self.distance(self.base_waypoints, self.last_wp, self.traffic_light_index)
+            # determine if this distance falls within a suitable range
+            if d_car_light > MIN_D and d_car_light < MAX_D: 
+                legit_ahead = True
+
+        if legit_ahead == True and new_traffic == True:
+            return True
+        else:
+            return False
+```
+Once the vehicle figures out it must slow down, it will asign each corresponding future waypoint a new but smaller speed than the reference speed `RefSpeed`.
+```python
+    def speed_before_traffic(self, d_car_light):
+        """Return waypoint speed when traffic light is seen"""
+        # speed = 0.0
+        if d_car_light < MIN_D:
+            speed = 0.0
+        elif d_car_light < MAX_D:
+            speed = (RefSpeed/2) * ((d_car_light - MIN_D) / (MAX_D - MIN_D))
+        
+        return speed
+```
+And finally it will construct message to be send to the final waypoint topic.
+```python
+    def construct_msg(self, lookAheadWpts):
+        # construct message to be sent
+        message_to_sent = Lane()
+        message_to_sent.header.stamp = rospy.Time.now()
+        message_to_sent.header.frame_id = self.frame_id
+        message_to_sent.waypoints = lookAheadWpts
+        return message_to_sent
+```
